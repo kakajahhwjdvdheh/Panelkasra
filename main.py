@@ -33,7 +33,7 @@ if __name__ == "__main__":
     sys.modules.setdefault("main", sys.modules[__name__])
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-APP_NAME = "Technamooz Panel"
+APP_NAME = "Tkasra bogzarnetPanel"
 APP_VERSION = "2.0.0"
 logger = logging.getLogger("Technamooz")
 
@@ -110,6 +110,26 @@ async def load_state():
                 AUTH["password_hash"] = data["password_hash"]
             if data.get("username"):
                 AUTH["username"] = str(data["username"]).strip()
+            # Membership source of truth: each link can belong to at most one group.
+            # Rebuild every group's link_ids from link.sub_id so stale UI payloads cannot
+            # make an unrelated group appear empty.
+            assignments = {}
+            for sid, sub in SUBS.items():
+                for uid in sub.get("link_ids", []) or []:
+                    uid = str(uid)
+                    if uid in LINKS and uid not in assignments:
+                        assignments[uid] = sid
+            for uid, link in LINKS.items():
+                sid = link.get("sub_id")
+                if sid in SUBS:
+                    assignments[uid] = sid
+            for sub in SUBS.values():
+                sub["link_ids"] = []
+            for uid, link in LINKS.items():
+                sid = assignments.get(uid)
+                link["sub_id"] = sid if sid in SUBS else None
+                if sid in SUBS:
+                    SUBS[sid].setdefault("link_ids", []).append(uid)
             logger.info(f"State loaded: {len(LINKS)} links, {len(SUBS)} subs")
     except Exception as e:
         logger.warning(f"Could not load state: {e}")
@@ -302,7 +322,7 @@ def now_ir() -> datetime:
 def generate_vless_link(
     uuid: str,
     host: str,
-    remark: str = "Technamooz",
+    remark: str = "",
     protocol: str = DEFAULT_PROTOCOL,
     fingerprint: str | None = None,
     alpn: str | None = None,
@@ -353,7 +373,7 @@ def vless_link_for_link(link: dict, uid: str, host: str) -> str:
     proto = link.get("protocol", DEFAULT_PROTOCOL)
     return generate_vless_link(
         uid, host,
-        remark=f"Technamooz-{link.get('label','')}",
+        remark=str(link.get("label", "")).strip(),
         protocol=proto,
         fingerprint=link.get("fingerprint"),
         alpn=link.get("alpn"),
@@ -660,6 +680,7 @@ async def list_subs(request: Request, _=Depends(require_auth)):
 @app.patch("/api/subs/{sub_id}")
 async def update_sub(sub_id: str, request: Request, _=Depends(require_auth)):
     body = await request.json()
+    desired_link_ids = None
     async with SUBS_LOCK:
         if sub_id not in SUBS:
             raise HTTPException(status_code=404, detail="sub not found")
@@ -672,46 +693,89 @@ async def update_sub(sub_id: str, request: Request, _=Depends(require_auth)):
             pw = str(body["password"]).strip()
             s["password_hash"] = hash_password(pw) if pw else None
         if "link_ids" in body:
-            s["link_ids"] = list(body["link_ids"])
-    asyncio.create_task(save_state())
+            # Only links explicitly listed here are members of this group.
+            # Moving one link never clears another group's unrelated links.
+            desired_link_ids = list(dict.fromkeys(str(x) for x in (body.get("link_ids") or [])))
+
+    if desired_link_ids is not None:
+        async with LINKS_LOCK:
+            async with SUBS_LOCK:
+                if sub_id not in SUBS:
+                    raise HTTPException(status_code=404, detail="sub not found")
+                desired = {uid for uid in desired_link_ids if uid in LINKS}
+
+                # Remove only links currently in this group that are no longer selected.
+                current = set(SUBS[sub_id].get("link_ids", []))
+                for uid in current - desired:
+                    if uid in LINKS and LINKS[uid].get("sub_id") == sub_id:
+                        LINKS[uid]["sub_id"] = None
+
+                # Add/move selected links. If a link belonged to another group, remove
+                # it from that group's list first, but leave every other link untouched.
+                for uid in desired:
+                    old_sub = LINKS[uid].get("sub_id")
+                    if old_sub and old_sub != sub_id and old_sub in SUBS:
+                        old_ids = SUBS[old_sub].setdefault("link_ids", [])
+                        if uid in old_ids:
+                            old_ids.remove(uid)
+                    LINKS[uid]["sub_id"] = sub_id
+
+                SUBS[sub_id]["link_ids"] = list(desired_link_ids)
+                SUBS[sub_id]["link_ids"] = [uid for uid in SUBS[sub_id]["link_ids"] if uid in LINKS]
+
+    await save_state()
     return {"ok": True}
 
 @app.delete("/api/subs/{sub_id}")
 async def delete_sub(sub_id: str, _=Depends(require_auth)):
-    async with SUBS_LOCK:
-        if sub_id not in SUBS:
-            raise HTTPException(status_code=404, detail="sub not found")
-        name = SUBS[sub_id].get("name", sub_id)
-        del SUBS[sub_id]
     async with LINKS_LOCK:
-        for link in LINKS.values():
-            if link.get("sub_id") == sub_id:
-                link["sub_id"] = None
-    asyncio.create_task(save_state())
+        async with SUBS_LOCK:
+            if sub_id not in SUBS:
+                raise HTTPException(status_code=404, detail="sub not found")
+            name = SUBS[sub_id].get("name", sub_id)
+            del SUBS[sub_id]
+            for link in LINKS.values():
+                if link.get("sub_id") == sub_id:
+                    link["sub_id"] = None
+    await save_state()
     log_activity("sub", f"گروه «{name}» حذف شد", "warn")
     return {"ok": True, "deleted": sub_id}
 
 @app.post("/api/subs/{sub_id}/links")
 async def assign_link_to_sub(sub_id: str, request: Request, _=Depends(require_auth)):
     body = await request.json()
-    link_id = str(body.get("link_id", ""))
-    action = str(body.get("action", "add"))
-    async with SUBS_LOCK:
-        if sub_id not in SUBS:
-            raise HTTPException(status_code=404, detail="sub not found")
-        s = SUBS[sub_id]
-        ids = s.setdefault("link_ids", [])
-        if action == "add":
-            if link_id not in ids:
-                ids.append(link_id)
-        else:
-            if link_id in ids:
-                ids.remove(link_id)
+    link_id = str(body.get("link_id", "")).strip()
+    action = str(body.get("action", "add")).lower()
+
+    if action not in {"add", "remove"}:
+        raise HTTPException(status_code=400, detail="عملیات نامعتبر است")
+
     async with LINKS_LOCK:
-        if link_id in LINKS:
-            LINKS[link_id]["sub_id"] = sub_id if action == "add" else None
-    asyncio.create_task(save_state())
-    return {"ok": True}
+        async with SUBS_LOCK:
+            if sub_id not in SUBS:
+                raise HTTPException(status_code=404, detail="sub not found")
+            if link_id not in LINKS:
+                raise HTTPException(status_code=404, detail="link not found")
+
+            ids = SUBS[sub_id].setdefault("link_ids", [])
+            if action == "add":
+                old_sub = LINKS[link_id].get("sub_id")
+                if old_sub and old_sub != sub_id and old_sub in SUBS:
+                    old_ids = SUBS[old_sub].setdefault("link_ids", [])
+                    if link_id in old_ids:
+                        old_ids.remove(link_id)
+                if link_id not in ids:
+                    ids.append(link_id)
+                LINKS[link_id]["sub_id"] = sub_id
+            else:
+                if link_id in ids:
+                    ids.remove(link_id)
+                # Never detach a link from a different group by mistake.
+                if LINKS[link_id].get("sub_id") == sub_id:
+                    LINKS[link_id]["sub_id"] = None
+
+    await save_state()
+    return {"ok": True, "sub_id": sub_id, "link_id": link_id, "action": action}
 
 # ── Public sub-group subscription file ───────────────────────────────────────
 @app.get("/sub-group/{uuid_key}")
@@ -1033,28 +1097,30 @@ async def create_sub_group(name: str = "گروه جدید", desc: str = "", pass
     return sub_id, SUBS[sub_id]
 
 async def set_link_sub(uid: str, sub_id: str | None) -> bool:
-    """یک کانفیگ رو به یک گروه ساب اضافه/منتقل می‌کنه؛ با sub_id=None از گروه فعلیش خارجش می‌کنه."""
+    """کانفیگ را به یک گروه منتقل یا از گروه فعلی خارج می‌کند.
+    تغییر membership اتمی است و روی کانفیگ‌های دیگر اثر نمی‌گذارد."""
     async with LINKS_LOCK:
-        if uid not in LINKS:
-            return False
-        old_sub = LINKS[uid].get("sub_id")
-        label = LINKS[uid].get("label", uid)
-    if sub_id is not None:
         async with SUBS_LOCK:
-            if sub_id not in SUBS:
+            if uid not in LINKS:
                 return False
-    async with SUBS_LOCK:
-        if old_sub and old_sub in SUBS:
-            ids = SUBS[old_sub].get("link_ids", [])
-            if uid in ids:
-                ids.remove(uid)
-        if sub_id and sub_id in SUBS:
-            ids = SUBS[sub_id].setdefault("link_ids", [])
-            if uid not in ids:
-                ids.append(uid)
-    async with LINKS_LOCK:
-        if uid in LINKS:
+            if sub_id is not None and sub_id not in SUBS:
+                return False
+
+            old_sub = LINKS[uid].get("sub_id")
+            label = LINKS[uid].get("label", uid)
+
+            if old_sub and old_sub in SUBS:
+                old_ids = SUBS[old_sub].setdefault("link_ids", [])
+                if uid in old_ids:
+                    old_ids.remove(uid)
+
+            if sub_id is not None:
+                new_ids = SUBS[sub_id].setdefault("link_ids", [])
+                if uid not in new_ids:
+                    new_ids.append(uid)
+
             LINKS[uid]["sub_id"] = sub_id
+
     asyncio.create_task(save_state())
     log_activity("link", f"کانفیگ «{label}» {'به گروه اضافه شد' if sub_id else 'از گروه خارج شد'}", "info")
     return True
@@ -1194,15 +1260,9 @@ async def update_link(uid: str, request: Request, _=Depends(require_auth)):
             link["sub_id"] = new_sub or None
 
     if new_sub != "UNCHANGED":
-        async with SUBS_LOCK:
-            if old_sub and old_sub in SUBS:
-                ids = SUBS[old_sub].get("link_ids", [])
-                if uid in ids:
-                    ids.remove(uid)
-            if new_sub and new_sub in SUBS:
-                ids = SUBS[new_sub].setdefault("link_ids", [])
-                if uid not in ids:
-                    ids.append(uid)
+        if new_sub and new_sub not in SUBS:
+            raise HTTPException(status_code=404, detail="sub not found")
+        await set_link_sub(uid, new_sub or None)
 
     asyncio.create_task(save_state())
     return {"ok": True}
