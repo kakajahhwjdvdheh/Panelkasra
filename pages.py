@@ -988,6 +988,7 @@ input:focus,select:focus,textarea:focus{border-color:var(--accent)!important;box
     <div class="nav-it" data-pg="connections"><i class="ti ti-plug-connected"></i> اتصالات <span class="nav-badge" id="conns-nb">0</span></div>
     <div class="nav-sec">سیستم</div>
     <div class="nav-it" data-pg="outbounds"><i class="ti ti-route"></i> خروجی‌ها <span class="nav-badge" id="outbounds-nb">0</span></div>
+    <div class="nav-it" data-pg="externals"><i class="ti ti-world-upload"></i> سرورهای خارجی <span class="nav-badge" id="externals-nb">0</span></div>
     <div class="nav-it" data-pg="security"><i class="ti ti-shield-lock"></i> امنیت</div>
     <div class="nav-it" data-pg="logs"><i class="ti ti-history"></i> لاگ فعالیت‌ها</div>
     <div class="nav-it" data-pg="errors"><i class="ti ti-alert-triangle"></i> خطاها</div>
