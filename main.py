@@ -48,12 +48,6 @@ SECRET_FILE = DATA_DIR / "technamooz_secret.key"
 SAVE_LOCK = asyncio.Lock()
 
 def _load_or_create_secret() -> str:
-    """SECRET_KEY را روی دیسک ذخیره و ثابت نگه می‌دارد.
-    قبلاً وقتی متغیر محیطی SECRET_KEY تنظیم نشده بود، با هر ری‌استارت سرویس
-    (که روی Railway هر چند ساعت یک‌بار اتفاق می‌افتد) یک مقدار تصادفی جدید
-    ساخته می‌شد. چون هش پسورد بر پایه‌ی همین secret ساخته می‌شود، تغییر آن
-    باعث می‌شد پسورد درست هم دیگر قبول نشود. حالا secret یک‌بار ساخته و در
-    فایل ذخیره می‌شود و در ری‌استارت‌های بعدی همان مقدار خوانده می‌شود."""
     env_secret = os.environ.get("SECRET_KEY")
     if env_secret:
         return env_secret
@@ -68,7 +62,7 @@ def _load_or_create_secret() -> str:
         SECRET_FILE.write_text(new_secret, encoding="utf-8")
         return new_secret
     except Exception as e:
-        logger.warning(f"Could not persist SECRET_KEY, sessions/password may reset on restart: {e}")
+        logger.warning(f"Could not persist SECRET_KEY: {e}")
         return secrets.token_urlsafe(32)
 
 CONFIG = {
@@ -104,15 +98,33 @@ async def load_state():
             for item in loaded_links.values():
                 if item.get("protocol") == "xhttp-stream-one":
                     item["protocol"] = "xhttp-stream-up"
+                # Migration: ensure every link has an outbound_id
+                item.setdefault("outbound_id", DEFAULT_OUTBOUND)
             LINKS.update(loaded_links)
             SUBS.update(loaded_subs)
             if "password_hash" in data:
                 AUTH["password_hash"] = data["password_hash"]
             if data.get("username"):
                 AUTH["username"] = str(data["username"]).strip()
+            # Load outbounds from state
+            try:
+                from outbound import OUTBOUNDS as _OB
+                saved_outbounds = data.get("outbounds", {})
+                if isinstance(saved_outbounds, dict):
+                    _OB.update(saved_outbounds)
+                    logger.info(f"Outbounds loaded: {len(_OB)}")
+            except Exception as e:
+                logger.warning(f"Could not load outbounds: {e}")
+            # Load external configs from state
+            try:
+                from external_configs import EXTERNAL_CONFIGS as _EC
+                saved_ec = data.get("external_configs", {})
+                if isinstance(saved_ec, dict):
+                    _EC.update(saved_ec)
+                    logger.info(f"External configs loaded: {len(_EC)}")
+            except Exception as e:
+                logger.warning(f"Could not load external configs: {e}")
             # Membership source of truth: each link can belong to at most one group.
-            # Rebuild every group's link_ids from link.sub_id so stale UI payloads cannot
-            # make an unrelated group appear empty.
             assignments = {}
             for sid, sub in SUBS.items():
                 for uid in sub.get("link_ids", []) or []:
@@ -138,12 +150,24 @@ async def save_state():
     async with SAVE_LOCK:
         try:
             DATA_DIR.mkdir(parents=True, exist_ok=True)
+            try:
+                from outbound import OUTBOUNDS as _OB
+                outbounds_snapshot = dict(_OB)
+            except Exception:
+                outbounds_snapshot = {}
+            try:
+                from external_configs import EXTERNAL_CONFIGS as _EC
+                external_configs_snapshot = dict(_EC)
+            except Exception:
+                external_configs_snapshot = {}
             data = {
                 "links": dict(LINKS),
                 "subs": dict(SUBS),
                 "password_hash": AUTH["password_hash"],
                 "username": AUTH["username"],
                 "telegram": dict(BOT_SETTINGS),
+                "outbounds": outbounds_snapshot,
+                "external_configs": external_configs_snapshot,
                 "saved_at": datetime.now().isoformat(),
             }
             tmp = DATA_FILE.with_suffix(".tmp")
@@ -191,8 +215,10 @@ MIN_PORT, MAX_PORT = 1, 65535
 # محدودیت سرعت (0 = نامحدود). واحد ذخیره‌سازی داخلی همیشه بایت‌بر‌ثانیه است.
 DEFAULT_SPEED_LIMIT = 0
 
+# Outbound پیش‌فرض
+DEFAULT_OUTBOUND = "direct"
+
 def log_activity(kind: str, message: str, level: str = "info"):
-    """ثبت یک رخداد در لاگ فعالیت‌ها (ساخت/حذف/ویرایش کانفیگ، ورود، و...)."""
     activity_logs.append({
         "kind": kind,
         "level": level,
@@ -205,7 +231,6 @@ SESSION_COOKIE = "technamooz_session"
 SESSION_TTL = 60 * 60 * 24 * 365
 
 def hash_password(pw: str) -> str:
-    """PBKDF2 password hash; legacy SHA-256 hashes remain verifiable for migration."""
     iterations = 310_000
     salt = secrets.token_hex(16)
     digest = hashlib.pbkdf2_hmac("sha256", pw.encode(), salt.encode(), iterations)
@@ -301,7 +326,6 @@ async def shutdown():
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def get_host(request: Request | None = None) -> str:
-    """Return a validated public host; proxy headers are trusted only when explicitly enabled."""
     configured = os.environ.get("RAILWAY_PUBLIC_DOMAIN") or CONFIG["host"]
     if request is not None:
         header_name = "x-forwarded-host" if TRUST_PROXY_HEADERS else "host"
@@ -328,8 +352,6 @@ def generate_vless_link(
     alpn: str | None = None,
     port: int | None = None,
 ) -> str:
-    """می‌سازد VLESS share-link متناسب با پروتکل انتخاب‌شده (WS کلاسیک یا یکی از مدهای XHTTP).
-    fingerprint / alpn / port در صورت ندادن، از پیش‌فرض‌های خود پروتکل استفاده می‌شوند."""
     fp = (fingerprint or DEFAULT_FINGERPRINT).strip() or DEFAULT_FINGERPRINT
     if fp not in FINGERPRINTS:
         fp = DEFAULT_FINGERPRINT
@@ -351,8 +373,7 @@ def generate_vless_link(
             "alpn": alpn_val,
         }
     else:
-        # xhttp-packet-up / xhttp-stream-up / xhttp-stream-one
-        mode = protocol.replace("xhttp-", "")  # packet-up | stream-up | stream-one
+        mode = protocol.replace("xhttp-", "")
         path = f"/xhttp-siz10/{mode}/{uuid}"
         params = {
             "encryption": "none",
@@ -369,7 +390,6 @@ def generate_vless_link(
     return f"vless://{uuid}@{host}:{port_val}?{query}#{quote(remark)}"
 
 def vless_link_for_link(link: dict, uid: str, host: str) -> str:
-    """generate_vless_link رو با تنظیمات دستی همون کانفیگ (fingerprint/alpn/port) صدا می‌زنه."""
     proto = link.get("protocol", DEFAULT_PROTOCOL)
     return generate_vless_link(
         uid, host,
@@ -393,8 +413,6 @@ def parse_size_to_bytes(value: float, unit: str) -> int:
     return int(value)
 
 def parse_speed_to_bytes(value: float, unit: str) -> int:
-    """محدودیت سرعت رو به بایت‌بر‌ثانیه تبدیل می‌کنه.
-    واحدهای پشتیبانی‌شده: MBIT (مگابیت‌بر‌ثانیه، رایج‌ترین)، KB (کیلوبایت‌بر‌ثانیه)، MB (مگابایت‌بر‌ثانیه)."""
     if value <= 0:
         return 0
     unit = (unit or "MBIT").upper()
@@ -434,13 +452,9 @@ def fmt_bytes(b: int) -> str:
     return f"{b/1024**3:.2f} GB"
 
 def unique_ips_for_uuid(uuid: str) -> set:
-    """آی‌پی‌های یکتای همین لحظه متصل به یک UUID خاص (بر اساس dict اتصالات زنده)."""
     return {c.get("ip") for c in connections.values() if c.get("uuid") == uuid and c.get("ip")}
 
 def is_ip_allowed(link: dict | None, uuid: str, ip: str) -> bool:
-    """محدودیت تعداد آی‌پی/کاربر هم‌زمان برای هر کانفیگ. ip_limit=0 یعنی نامحدود.
-    اگر همین آی‌پی از قبل روی این کانفیگ سشن باز داشته باشه، همیشه مجازه (برای چند اتصال
-    هم‌زمان از یک دستگاه/مرورگر مشکلی پیش نمیاد)."""
     if link is None:
         return False
     limit = int(link.get("ip_limit", 0) or 0)
@@ -452,7 +466,6 @@ def is_ip_allowed(link: dict | None, uuid: str, ip: str) -> bool:
     return len(ips) < limit
 
 def client_ip(request: Request) -> str:
-    """آی‌پی واقعی کلاینت رو با احتساب هدرهای پراکسی (Railway/Cloudflare) برمی‌گردونه."""
     fwd = request.headers.get("x-forwarded-for")
     if fwd:
         return fwd.split(",")[0].strip()
@@ -489,6 +502,7 @@ async def ensure_default_link():
                     "port": DEFAULT_PORT,
                     "ip_limit": 0,
                     "speed_limit_bytes": DEFAULT_SPEED_LIMIT,
+                    "outbound_id": DEFAULT_OUTBOUND,
                 }
                 asyncio.create_task(save_state())
         _default_link_created = True
@@ -519,7 +533,7 @@ async def system_info(_=Depends(require_auth)):
         "active_links": active_links,
         "subs_count": subs_count,
         "active_connections": len(connections),
-        "features": ["VLESS", "WebSocket", "XHTTP", "Traffic limits", "Speed limits", "IP limits", "Telegram bot", "Backup/export"],
+        "features": ["VLESS", "WebSocket", "XHTTP", "Traffic limits", "Speed limits", "IP limits", "Telegram bot", "Backup/export", "Outbounds", "External configs"],
     }
 
 @app.get("/api/backup")
@@ -528,12 +542,24 @@ async def download_backup(_=Depends(require_auth)):
         links = dict(LINKS)
     async with SUBS_LOCK:
         subs = dict(SUBS)
+    try:
+        from outbound import OUTBOUNDS as _OB
+        outbounds_snapshot = dict(_OB)
+    except Exception:
+        outbounds_snapshot = {}
+    try:
+        from external_configs import EXTERNAL_CONFIGS as _EC
+        external_configs_snapshot = dict(_EC)
+    except Exception:
+        external_configs_snapshot = {}
     payload = {
         "format": "technamooz-backup",
         "version": APP_VERSION,
         "created_at": datetime.now().isoformat(),
         "links": links,
         "subs": subs,
+        "outbounds": outbounds_snapshot,
+        "external_configs": external_configs_snapshot,
     }
     return Response(
         content=json.dumps(payload, ensure_ascii=False, indent=2),
@@ -556,6 +582,22 @@ async def restore_backup(request: Request, _=Depends(require_auth)):
     async with SUBS_LOCK:
         SUBS.clear()
         SUBS.update(subs)
+    try:
+        from outbound import OUTBOUNDS as _OB
+        restored_outbounds = body.get("outbounds")
+        if isinstance(restored_outbounds, dict):
+            _OB.clear()
+            _OB.update(restored_outbounds)
+    except Exception as e:
+        logger.warning(f"Could not restore outbounds: {e}")
+    try:
+        from external_configs import EXTERNAL_CONFIGS as _EC
+        restored_ec = body.get("external_configs")
+        if isinstance(restored_ec, dict):
+            _EC.clear()
+            _EC.update(restored_ec)
+    except Exception as e:
+        logger.warning(f"Could not restore external configs: {e}")
     await save_state()
     log_activity("backup", "پشتیبان با موفقیت restore شد", "ok")
     return {"ok": True, "links": len(LINKS), "subs": len(SUBS)}
@@ -616,6 +658,12 @@ async def subscription_all(request: Request, _=Depends(require_auth)):
             for uid, d in LINKS.items()
             if is_link_allowed(d)
         ]
+    # اضافه کردن کانفیگ‌های خارجی
+    try:
+        from external_configs import get_active_urls
+        lines.extend(get_active_urls())
+    except Exception:
+        pass
     content = base64.b64encode("\n".join(lines).encode()).decode()
     return Response(content=content, media_type="text/plain")
 
@@ -693,8 +741,6 @@ async def update_sub(sub_id: str, request: Request, _=Depends(require_auth)):
             pw = str(body["password"]).strip()
             s["password_hash"] = hash_password(pw) if pw else None
         if "link_ids" in body:
-            # Only links explicitly listed here are members of this group.
-            # Moving one link never clears another group's unrelated links.
             desired_link_ids = list(dict.fromkeys(str(x) for x in (body.get("link_ids") or [])))
 
     if desired_link_ids is not None:
@@ -703,15 +749,10 @@ async def update_sub(sub_id: str, request: Request, _=Depends(require_auth)):
                 if sub_id not in SUBS:
                     raise HTTPException(status_code=404, detail="sub not found")
                 desired = {uid for uid in desired_link_ids if uid in LINKS}
-
-                # Remove only links currently in this group that are no longer selected.
                 current = set(SUBS[sub_id].get("link_ids", []))
                 for uid in current - desired:
                     if uid in LINKS and LINKS[uid].get("sub_id") == sub_id:
                         LINKS[uid]["sub_id"] = None
-
-                # Add/move selected links. If a link belonged to another group, remove
-                # it from that group's list first, but leave every other link untouched.
                 for uid in desired:
                     old_sub = LINKS[uid].get("sub_id")
                     if old_sub and old_sub != sub_id and old_sub in SUBS:
@@ -719,7 +760,6 @@ async def update_sub(sub_id: str, request: Request, _=Depends(require_auth)):
                         if uid in old_ids:
                             old_ids.remove(uid)
                     LINKS[uid]["sub_id"] = sub_id
-
                 SUBS[sub_id]["link_ids"] = list(desired_link_ids)
                 SUBS[sub_id]["link_ids"] = [uid for uid in SUBS[sub_id]["link_ids"] if uid in LINKS]
 
@@ -770,7 +810,6 @@ async def assign_link_to_sub(sub_id: str, request: Request, _=Depends(require_au
             else:
                 if link_id in ids:
                     ids.remove(link_id)
-                # Never detach a link from a different group by mistake.
                 if LINKS[link_id].get("sub_id") == sub_id:
                     LINKS[link_id]["sub_id"] = None
 
@@ -800,6 +839,13 @@ async def sub_group_subscription(uuid_key: str, request: Request):
             if link and is_link_allowed(link):
                 lines.append(vless_link_for_link(link, lid, host))
 
+    # اضافه کردن کانفیگ‌های خارجی
+    try:
+        from external_configs import get_active_urls
+        lines.extend(get_active_urls())
+    except Exception:
+        pass
+
     content = base64.b64encode("\n".join(lines).encode()).decode()
     return Response(
         content=content,
@@ -810,6 +856,175 @@ async def sub_group_subscription(uuid_key: str, request: Request):
             "profile-update-interval": "12",
         }
     )
+
+# ══════════════════════════════════════════════════════════════════════════════
+# OUTBOUNDS API  (مثل سنایی/3x-ui)
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/api/outbounds")
+async def list_outbounds(_=Depends(require_auth)):
+    try:
+        from outbound import list_all_outbounds
+        return {"outbounds": list_all_outbounds()}
+    except Exception as e:
+        logger.warning(f"outbound module unavailable: {e}")
+        return {"outbounds": [
+            {"id": "direct", "name": "مستقیم (Freedom)", "type": "freedom", "active": True, "builtin": True},
+            {"id": "block",  "name": "مسدود (Block)",   "type": "blackhole", "active": True, "builtin": True},
+        ]}
+
+@app.post("/api/outbounds")
+async def create_outbound(request: Request, _=Depends(require_auth)):
+    body = await request.json()
+    name = str(body.get("name") or "").strip()
+    ob_type = str(body.get("type") or "").strip().lower()
+    if ob_type not in {"socks5", "vless"}:
+        raise HTTPException(status_code=400, detail="نوع outbound باید socks5 یا vless باشد")
+    if not name:
+        name = f"Outbound ({ob_type})"
+
+    try:
+        from outbound import make_outbound_record, OUTBOUNDS as _OB, OUTBOUNDS_LOCK as _OBL
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"outbound module unavailable: {e}")
+
+    address = str(body.get("address") or "").strip()
+    try:
+        port = int(body.get("port") or 0)
+    except (TypeError, ValueError):
+        port = 0
+    username = str(body.get("username") or "").strip()
+    password = str(body.get("password") or "")
+    url = str(body.get("url") or "").strip()
+
+    if ob_type == "socks5":
+        if not address or not (1 <= port <= 65535):
+            raise HTTPException(status_code=400, detail="آدرس و پورت معتبر الزامی است")
+    elif ob_type == "vless":
+        if not url.startswith("vless://"):
+            raise HTTPException(status_code=400, detail="لینک VLESS معتبر الزامی است")
+
+    oid, record = make_outbound_record(
+        name=name, ob_type=ob_type, address=address, port=port,
+        username=username, password=password, url=url,
+    )
+    async with _OBL:
+        _OB[oid] = record
+    asyncio.create_task(save_state())
+    log_activity("outbound", f"خروجی «{name}» ({ob_type}) ساخته شد", "ok")
+    return {"ok": True, "id": oid, "outbound": record}
+
+@app.patch("/api/outbounds/{oid}")
+async def update_outbound(oid: str, request: Request, _=Depends(require_auth)):
+    body = await request.json()
+    try:
+        from outbound import OUTBOUNDS as _OB, OUTBOUNDS_LOCK as _OBL, BUILTIN_OUTBOUNDS as _BUILTIN
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"outbound module unavailable: {e}")
+    if oid in _BUILTIN:
+        raise HTTPException(status_code=400, detail="outboundهای پیش‌فرض قابل ویرایش نیستند")
+    async with _OBL:
+        if oid not in _OB:
+            raise HTTPException(status_code=404, detail="outbound not found")
+        rec = _OB[oid]
+        if "name" in body:
+            rec["name"] = str(body.get("name") or rec["name"]).strip()[:60]
+        if "address" in body:
+            rec["address"] = str(body.get("address") or "").strip()
+        if "port" in body:
+            try: rec["port"] = int(body.get("port") or 0)
+            except (TypeError, ValueError): pass
+        if "username" in body:
+            rec["username"] = str(body.get("username") or "").strip()
+        if "password" in body:
+            rec["password"] = str(body.get("password") or "")
+        if "url" in body:
+            rec["url"] = str(body.get("url") or "").strip()
+        if "active" in body:
+            rec["active"] = bool(body.get("active"))
+    await save_state()
+    log_activity("outbound", f"خروجی «{rec.get('name', oid)}» ویرایش شد", "info")
+    return {"ok": True, "outbound": rec}
+
+@app.delete("/api/outbounds/{oid}")
+async def delete_outbound(oid: str, _=Depends(require_auth)):
+    try:
+        from outbound import OUTBOUNDS as _OB, OUTBOUNDS_LOCK as _OBL, BUILTIN_OUTBOUNDS as _BUILTIN
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"outbound module unavailable: {e}")
+    if oid in _BUILTIN:
+        raise HTTPException(status_code=400, detail="outboundهای پیش‌فرض قابل حذف نیستند")
+    async with _OBL:
+        if oid not in _OB:
+            raise HTTPException(status_code=404, detail="outbound not found")
+        rec = _OB.pop(oid)
+    async with LINKS_LOCK:
+        for link in LINKS.values():
+            if link.get("outbound_id") == oid:
+                link["outbound_id"] = DEFAULT_OUTBOUND
+    await save_state()
+    log_activity("outbound", f"خروجی «{rec.get('name', oid)}» حذف شد", "warn")
+    return {"ok": True, "deleted": oid}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# EXTERNAL CONFIGS API  (سرورهای خارجی — مثل سنایی)
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/api/external-configs")
+async def list_external_configs(_=Depends(require_auth)):
+    try:
+        from external_configs import list_all
+        return {"configs": list_all()}
+    except Exception as e:
+        logger.warning(f"external_configs module unavailable: {e}")
+        return {"configs": []}
+
+@app.post("/api/external-configs")
+async def create_external_config(request: Request, _=Depends(require_auth)):
+    body = await request.json()
+    name = str(body.get("name") or "").strip()
+    url = str(body.get("url") or "").strip()
+    if not url:
+        raise HTTPException(status_code=400, detail="لینک کانفیگ الزامی است")
+    if not (url.startswith("vless://") or url.startswith("vmess://") or url.startswith("trojan://") or url.startswith("ss://")):
+        raise HTTPException(status_code=400, detail="فقط لینک‌های vless/vmess/trojan/ss پشتیبانی می‌شوند")
+    if not name:
+        name = "سرور خارجی"
+    try:
+        from external_configs import add_config
+        eid, record = add_config(name, url)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"external_configs module unavailable: {e}")
+    asyncio.create_task(save_state())
+    log_activity("external", f"سرور خارجی «{name}» اضافه شد", "ok")
+    return {"ok": True, "id": eid, "config": record}
+
+@app.patch("/api/external-configs/{eid}")
+async def update_external_config(eid: str, request: Request, _=Depends(require_auth)):
+    body = await request.json()
+    try:
+        from external_configs import update_config
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"external_configs module unavailable: {e}")
+    rec = update_config(eid, name=body.get("name"), url=body.get("url"), active=body.get("active"))
+    if rec is None:
+        raise HTTPException(status_code=404, detail="config not found")
+    await save_state()
+    log_activity("external", f"سرور خارجی «{rec.get('name', eid)}» ویرایش شد", "info")
+    return {"ok": True, "config": rec}
+
+@app.delete("/api/external-configs/{eid}")
+async def delete_external_config(eid: str, _=Depends(require_auth)):
+    try:
+        from external_configs import remove_config
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"external_configs module unavailable: {e}")
+    rec = remove_config(eid)
+    if rec is None:
+        raise HTTPException(status_code=404, detail="config not found")
+    await save_state()
+    log_activity("external", f"سرور خارجی «{rec.get('name', eid)}» حذف شد", "warn")
+    return {"ok": True, "deleted": eid}
 
 # ── Auth endpoints ────────────────────────────────────────────────────────────
 @app.post("/api/login")
@@ -825,7 +1040,6 @@ async def api_login(request: Request):
         raise HTTPException(status_code=429, detail="تعداد تلاش‌ها زیاد است؛ چند دقیقه بعد دوباره امتحان کنید")
     username = str(body.get("username", "")).strip()
     username_ok = hmac.compare_digest(username, AUTH["username"]) if username else False
-    # Password-only clients remain accepted only for backwards compatibility during migration.
     legacy_client = not username
     if (not legacy_client and not username_ok) or not verify_password(str(body.get("password", "")), AUTH["password_hash"]):
         await record_login_failure(ip)
@@ -940,13 +1154,6 @@ async def get_activity(_=Depends(require_auth)):
 # ── Live connections (with IP) ────────────────────────────────────────────────
 @app.get("/api/connections")
 async def get_connections(_=Depends(require_auth)):
-    """
-    خروجی این endpoint حالا بر اساس IP گروه‌بندی شده:
-    هر آی‌پی فقط یک آیتم نمایش داده می‌شود، با جمع بایت‌های تمام سشن‌های
-    باز روی همان آی‌پی و تعداد سشن‌های فعال آن آی‌پی.
-    raw_count همچنان تعداد واقعی اتصالات باز (سشن‌های خام، مثلاً ۴۰ تا
-    اتصال هم‌زمان یک موبایل) را برمی‌گرداند.
-    """
     async with LINKS_LOCK:
         snap = dict(LINKS)
 
@@ -995,11 +1202,11 @@ async def get_connections(_=Depends(require_auth)):
 
     return {
         "connections": result,
-        "count": len(result),          # تعداد آی‌پی‌های یکتا
-        "raw_count": len(connections), # تعداد کل اتصالات باز (بدون گروه‌بندی)
+        "count": len(result),
+        "raw_count": len(connections),
     }
 
-# ── Shared link create/delete helpers (استفاده مشترک API و ربات تلگرام) ───────
+# ── Shared link create/delete helpers ───────
 async def make_link(
     label: str = "لینک جدید",
     limit_bytes: int = 0,
@@ -1012,6 +1219,7 @@ async def make_link(
     port: int = DEFAULT_PORT,
     ip_limit: int = 0,
     speed_limit_bytes: int = 0,
+    outbound_id: str = DEFAULT_OUTBOUND,
 ) -> tuple[str, dict]:
     if protocol not in PROTOCOLS:
         protocol = DEFAULT_PROTOCOL
@@ -1020,6 +1228,7 @@ async def make_link(
         fingerprint = DEFAULT_FINGERPRINT
     if not (MIN_PORT <= port <= MAX_PORT):
         port = DEFAULT_PORT
+    outbound_id = (outbound_id or DEFAULT_OUTBOUND).strip() or DEFAULT_OUTBOUND
     uid = generate_uuid()
     async with LINKS_LOCK:
         LINKS[uid] = {
@@ -1038,6 +1247,7 @@ async def make_link(
             "port": port,
             "ip_limit": max(0, ip_limit),
             "speed_limit_bytes": max(0, speed_limit_bytes),
+            "outbound_id": outbound_id,
         }
     if sub_id:
         async with SUBS_LOCK:
@@ -1076,7 +1286,7 @@ async def set_link_active(uid: str, active: bool) -> dict | None:
     asyncio.create_task(save_state())
     return LINKS[uid]
 
-# ── Sub-group helpers (reusable — هم API وب هم ربات تلگرام از همین‌ها استفاده می‌کنن) ──
+# ── Sub-group helpers ──
 async def create_sub_group(name: str = "گروه جدید", desc: str = "", password: str = "") -> tuple[str, dict]:
     name = (name or "گروه جدید").strip()[:60]
     desc = (desc or "").strip()[:200]
@@ -1097,8 +1307,6 @@ async def create_sub_group(name: str = "گروه جدید", desc: str = "", pass
     return sub_id, SUBS[sub_id]
 
 async def set_link_sub(uid: str, sub_id: str | None) -> bool:
-    """کانفیگ را به یک گروه منتقل یا از گروه فعلی خارج می‌کند.
-    تغییر membership اتمی است و روی کانفیگ‌های دیگر اثر نمی‌گذارد."""
     async with LINKS_LOCK:
         async with SUBS_LOCK:
             if uid not in LINKS:
@@ -1161,6 +1369,8 @@ async def create_link(request: Request, _=Depends(require_auth)):
     su = body.get("speed_limit_unit") or "MBIT"
     speed_limit_bytes = 0 if sv <= 0 else parse_speed_to_bytes(sv, su)
 
+    outbound_id = str(body.get("outbound_id") or DEFAULT_OUTBOUND).strip() or DEFAULT_OUTBOUND
+
     uid, link = await make_link(
         label=body.get("label") or "لینک جدید",
         limit_bytes=limit_bytes,
@@ -1173,6 +1383,7 @@ async def create_link(request: Request, _=Depends(require_auth)):
         port=port,
         ip_limit=ip_limit,
         speed_limit_bytes=speed_limit_bytes,
+        outbound_id=outbound_id,
     )
 
     host = get_host(request)
@@ -1253,7 +1464,11 @@ async def update_link(uid: str, request: Request, _=Depends(require_auth)):
             link["speed_limit_bytes"] = 0 if sv <= 0 else parse_speed_to_bytes(sv, su)
             from speed_limit import reset_bucket
             reset_bucket(uid)
-        if any(k in body for k in ("label", "note", "limit_value", "expires_days", "fingerprint", "alpn", "port", "ip_limit", "speed_limit_value")):
+        if "outbound_id" in body:
+            oid = str(body.get("outbound_id") or DEFAULT_OUTBOUND).strip() or DEFAULT_OUTBOUND
+            link["outbound_id"] = oid
+            log_activity("link", f"خروجی کانفیگ «{label}» به {oid} تغییر کرد", "info")
+        if any(k in body for k in ("label", "note", "limit_value", "expires_days", "fingerprint", "alpn", "port", "ip_limit", "speed_limit_value", "outbound_id")):
             log_activity("link", f"کانفیگ «{link['label']}» ویرایش شد", "info")
         new_sub = body.get("sub_id", "UNCHANGED")
         if new_sub != "UNCHANGED":
@@ -1275,7 +1490,7 @@ async def delete_link(uid: str, _=Depends(require_auth)):
     return {"ok": True, "deleted": uid}
 
 # ══════════════════════════════════════════════════════════════════════════════
-# VLESS Relay — جدا شده به relay_vless.py (دست نخورده)
+# VLESS Relay — جدا شده به relay_vless.py
 # ══════════════════════════════════════════════════════════════════════════════
 
 from relay_vless import (
@@ -1285,14 +1500,14 @@ from relay_vless import (
 app.add_api_websocket_route("/ws/{uuid}", websocket_tunnel)
 
 # ══════════════════════════════════════════════════════════════════════════════
-# XHTTP — Siz10a XHTTP Ultra (ترابرد جدید، جدا از VLESS/WS، هر ۳ مد)
+# XHTTP — Siz10a XHTTP Ultra
 # ══════════════════════════════════════════════════════════════════════════════
 from xhttp_siz10 import router as xhttp_router
 
 app.include_router(xhttp_router)
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ربات مدیریت تلگرام (اختیاری — فقط اگه TELEGRAM_BOT_TOKEN ست شده باشه فعال می‌شه)
+# ربات مدیریت تلگرام
 # ══════════════════════════════════════════════════════════════════════════════
 from telegram_bot import start_bot as _tg_start_bot
 from telegram_bot import stop_bot as _tg_stop_bot
