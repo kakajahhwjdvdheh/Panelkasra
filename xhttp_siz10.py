@@ -15,6 +15,8 @@ from datetime import datetime
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
+from outbound import open_via_outbound, get_outbound
+
 from main import (
     LINKS,
     LINKS_LOCK,
@@ -177,10 +179,24 @@ def _req_client_ip(request: Request) -> str:
     return request.client.host if request.client else "نامشخص"
 
 
-async def _open_tcp_from_header(first_chunk: bytes):
+async def _open_tcp_from_header(first_chunk: bytes, uuid: str = ""):
     command, address, port, payload = await parse_vless_header(first_chunk)
-    reader, writer = await asyncio.wait_for(
-        asyncio.open_connection(address, port), timeout=TCP_CONNECT_TIMEOUT
+
+    # ── انتخاب Outbound ─────────────────────────────
+    outbound_id = "direct"
+    if uuid:
+        async with LINKS_LOCK:
+            link = LINKS.get(uuid)
+        if link:
+            outbound_id = link.get("outbound_id", "direct")
+
+    logger.info(f"🔀 XHTTP outbound={outbound_id} → {address}:{port}")
+
+    reader, writer = await open_via_outbound(
+        outbound_id,
+        address,
+        port,
+        timeout=TCP_CONNECT_TIMEOUT,
     )
     _tune_socket(writer)
     if payload:
@@ -316,7 +332,7 @@ async def _pump_tcp_to_queue(session_id: str, uuid: str, reader: asyncio.StreamR
 
 async def _open_tcp_for_session(session_id: str, uuid: str, sess: dict, first_chunk: bytes):
     """تونل TCP رو از روی هدر VLESS باز می‌کنه و پمپ دانلینک رو راه می‌اندازه."""
-    reader, writer, address, port = await _open_tcp_from_header(first_chunk)
+    reader, writer, address, port = await _open_tcp_from_header(first_chunk, uuid)   # ✅ uuid پاس داده شد
     logger.info(f"connect XHTTP[{sess['mode']}] [{session_id[:8]}] -> {address}:{port}")
     sess["writer"] = writer
     sess["tcp_open"] = True
