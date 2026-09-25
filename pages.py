@@ -1368,6 +1368,24 @@ input:focus,select:focus,textarea:focus{border-color:var(--accent)!important;box
     <p>هنوز خروجی سفارشی‌ای تعریف نشده</p>
   </div>
 </section>
+<section class="pg" id="pg-externals">
+  <div class="topbar">
+    <div><div class="tb-title"><i class="ti ti-world-upload"></i> سرورهای خارجی</div><div class="tb-sub">کانفیگ‌های خارجی که توی ساب‌لینک کاربرا نمایش داده می‌شن</div></div>
+    <div class="tb-right">
+      <span class="badge bg-green" id="externals-pg-cnt">۰ سرور</span>
+      <button class="btn btn-p" onclick="openModal('modal-create-external')" style="background:linear-gradient(135deg,#22c55e,#15803d)"><i class="ti ti-plus"></i> سرور جدید</button>
+    </div>
+  </div>
+  <div class="cl" style="margin-bottom:16px;background:rgba(34,197,94,.08);border-color:rgba(34,197,94,.2);color:#86efac">
+    <i class="ti ti-info-circle" style="color:#22c55e"></i>
+    <span>این کانفیگ‌ها <b>مستقیم</b> در ساب‌لینک کاربرا قرار می‌گیرن (کنار کانفیگ‌های پنل).</span>
+  </div>
+  <div class="cfg-grid" id="externals-grid"></div>
+  <div class="empty" id="externals-empty" style="display:none">
+    <i class="ti ti-world-off"></i>
+    <p>هنوز سرور خارجی‌ای اضافه نشده</p>
+  </div>
+</section>
 <section class="pg" id="pg-security">
   <div class="topbar"><div><div class="tb-title"><i class="ti ti-shield-lock"></i> امنیت</div></div></div>
   <div class="g2">
