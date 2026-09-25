@@ -2818,4 +2818,22 @@ async function init(){{
 
 init();
 </script>
+<div class="modal-bg" id="modal-create-external">
+  <div class="modal-v2">
+    <div class="modal-v2-head">
+      <button class="modal-v2-close" onclick="closeModal('modal-create-external')"><i class="ti ti-x"></i></button>
+      <div class="modal-v2-icon" style="background:linear-gradient(135deg,#22c55e,#15803d)"><i class="ti ti-world-upload"></i></div>
+      <div class="modal-v2-title">سرور خارجی جدید</div>
+      <div class="modal-v2-sub">یه کانفیگ از پنل دیگه رو اضافه کن</div>
+    </div>
+    <div class="modal-v2-body">
+      <div class="modal-v2-field"><label><i class="ti ti-tag"></i> نام نمایشی</label><input class="modal-v2-input" id="ne-name" placeholder="مثلاً: سرور آلمان"></div>
+      <div class="modal-v2-field" style="margin-bottom:0"><label><i class="ti ti-link"></i> لینک کانفیگ</label><input class="modal-v2-input" id="ne-url" placeholder="vless://..." style="padding-right:13px"></div>
+      <div class="modal-v2-footer">
+        <button class="btn btn-o" onclick="closeModal('modal-create-external')" style="flex:.6">انصراف</button>
+        <button class="btn btn-p" onclick="createExternalConfig()" style="background:linear-gradient(135deg,#22c55e,#15803d)"><i class="ti ti-check"></i> افزودن</button>
+      </div>
+    </div>
+  </div>
+</div>
 </body></html>"""
