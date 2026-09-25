@@ -171,6 +171,26 @@ def parse_vless_url(url: str) -> dict:
     }
 
 
+def _uuid_to_bytes(uuid_str: str) -> bytes:
+    """
+    تبدیل UUID (استاندارد یا غیراستاندارد) به 16 بایت.
+    اگه UUID استاندارد باشه، از uuid.UUID استفاده می‌کنه.
+    اگه غیراستاندارد باشه، از hex خام استفاده می‌کنه.
+    """
+    import uuid as uuid_mod
+    uuid_str = (uuid_str or "").strip()
+    if not uuid_str:
+        raise ValueError("UUID خالی است")
+    try:
+        return uuid_mod.UUID(uuid_str).bytes
+    except (ValueError, AttributeError):
+        # UUID غیراستاندارد — از hex خام استفاده کن
+        hex_str = uuid_str.replace("-", "").lower()
+        if len(hex_str) == 32 and all(c in "0123456789abcdef" for c in hex_str):
+            return bytes.fromhex(hex_str)
+        raise ValueError(f"UUID نامعتبر: {uuid_str}")
+
+
 def _build_vless_header(target_host: str, target_port: int) -> bytes:
     """ساخت هدر VLESS برای درخواست CONNECT به مقصد."""
     import os
@@ -189,45 +209,72 @@ async def _vless_chain_connect(
 ):
     """
     اتصال به مقصد از طریق یه سرور VLESS دیگه (زنجیره).
-    به این صورت:
       1) به سرور VLESS (host:port) با WebSocket + TLS وصل می‌شیم
       2) هدر VLESS می‌سازیم برای CONNECT به target_host:target_port
       3) یه wrapper برمی‌گردونیم که مثل reader/writer asyncio کار کنه
-
     خروجی: (reader-like, writer-like)
     """
-    import websockets  # اگه نصب نیست: pip install websockets
+    import websockets
+    import ssl as ssl_mod
 
     url = outbound.get("url", "")
     cfg = parse_vless_url(url)
 
-    # WebSocket URL بساز
+    # ── ساخت WebSocket URL ──────────────────────────────
     scheme = "wss" if cfg["security"] == "tls" else "ws"
     ws_url = f"{scheme}://{cfg['host']}:{cfg['port']}{cfg['path']}"
 
+    # ── Headers ──────────────────────────────────────────
     headers = {
         "Host": cfg["host_header"],
         "User-Agent": "Mozilla/5.0",
     }
 
+    # ── SSL context (برای TLS و SNI spoof) ──────────────
+    ssl_context = None
+    if scheme == "wss":
+        ssl_context = ssl_mod.create_default_context()
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl_mod.CERT_NONE
+        if cfg.get("sni"):
+            try:
+                ssl_context.server_hostname = cfg["sni"]
+            except Exception:
+                pass
+
+    # ── اتصال WebSocket ─────────────────────────────────
     try:
-        ws = await asyncio.wait_for(
-            websockets.connect(
-                ws_url,
-                extra_headers=headers,
-                open_timeout=timeout,
-                max_size=None,
-                ping_interval=None,
-            ),
-            timeout=timeout,
-        )
+        connect_kwargs = {
+            "open_timeout": timeout,
+            "max_size": None,
+            "ping_interval": None,
+        }
+        if ssl_context is not None:
+            connect_kwargs["ssl"] = ssl_context
+        # سازگاری با websockets >= 12 (additional_headers) و < 12 (extra_headers)
+        try:
+            ws = await asyncio.wait_for(
+                websockets.connect(ws_url, additional_headers=headers, **connect_kwargs),
+                timeout=timeout,
+            )
+        except TypeError:
+            ws = await asyncio.wait_for(
+                websockets.connect(ws_url, extra_headers=headers, **connect_kwargs),
+                timeout=timeout,
+            )
     except Exception as e:
         raise ConnectionError(f"VLESS chain: ws connect failed: {e}")
 
     # ── ساخت هدر VLESS ──────────────────────────────────
-    import uuid as uuid_mod
+    try:
+        vless_uuid = _uuid_to_bytes(cfg["uuid"])
+    except ValueError as e:
+        try:
+            await ws.close()
+        except Exception:
+            pass
+        raise ConnectionError(f"VLESS chain: {e}")
 
-    vless_uuid = uuid_mod.UUID(cfg["uuid"]).bytes
     header = bytearray()
     header.append(0x00)                    # version
     header.extend(vless_uuid)              # 16 bytes UUID
@@ -236,7 +283,6 @@ async def _vless_chain_connect(
     header.extend(target_port.to_bytes(2, "big"))
     # address
     try:
-        # IPv4?
         parts = target_host.split(".")
         if len(parts) == 4 and all(p.isdigit() for p in parts):
             header.append(0x01)
@@ -244,12 +290,10 @@ async def _vless_chain_connect(
         else:
             raise ValueError
     except Exception:
-        # domain
         hb = target_host.encode()
         header.append(0x02)
         header.append(len(hb))
         header.extend(hb)
-    # payload نداریم، اول کار
 
     try:
         await ws.send(bytes(header))
@@ -257,19 +301,12 @@ async def _vless_chain_connect(
         await ws.close()
         raise ConnectionError(f"VLESS chain: header send failed: {e}")
 
-    # ── Wrapper که رفتار reader/writer asyncio رو تقلید کنه ──
     return _VlessChainStream(ws)
 
 
 class _VlessChainStream:
     """
     Adapter که یه WebSocket رو به شکل (reader, writer) asyncio ارائه می‌ده.
-    فقط متدهای مورد نیاز relay_vless.py و xhttp_siz10.py:
-      reader.read(n), reader.readexactly(n)
-      writer.write(data), writer.drain(), writer.close(), writer.wait_closed()
-      writer.transport.get_write_buffer_size()
-      writer.transport.get_extra_info('socket')
-      writer.write_eof()
     """
     class _FakeTransport:
         def __init__(self):
@@ -285,7 +322,7 @@ class _VlessChainStream:
         self._closed = False
         self._recv_task = asyncio.create_task(self._recv_loop())
         self.transport = self._FakeTransport()
-        self._reader = self  # reader = self
+        self._reader = self
 
     async def _recv_loop(self):
         try:
@@ -296,7 +333,7 @@ class _VlessChainStream:
         except Exception:
             pass
         finally:
-            await self._buf_queue.put(None)  # EOF
+            await self._buf_queue.put(None)
 
     # ── reader API ─────────────────────────────────────
     async def read(self, n: int = -1) -> bytes:
@@ -333,7 +370,6 @@ class _VlessChainStream:
             self.transport._buf = max(0, self.transport._buf - len(data))
 
     async def drain(self):
-        # WebSocket backpressure رو خودش هندل می‌کنه
         await asyncio.sleep(0)
 
     def write_eof(self):
@@ -394,7 +430,7 @@ async def open_via_outbound(
 
     if ob_type == "vless":
         stream = await _vless_chain_connect(ob, target_host, target_port, timeout)
-        return stream, stream  # reader = writer = stream
+        return stream, stream
 
     # freedom (direct)
     return await asyncio.wait_for(
@@ -404,7 +440,7 @@ async def open_via_outbound(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# CRUD helpers (اختیاری — اگه خواستی از API صدا بزنی)
+# CRUD helpers
 # ══════════════════════════════════════════════════════════════════════════════
 
 def make_outbound_record(
