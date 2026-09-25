@@ -5,6 +5,7 @@
 import asyncio
 import secrets
 from datetime import datetime
+from outbound import open_via_outbound, get_outbound
 
 from fastapi import WebSocket, WebSocketDisconnect
 
@@ -165,9 +166,16 @@ async def websocket_tunnel(ws: WebSocket, uuid: str):
         connections[conn_id]["bytes"] += len(first_chunk)
         logger.info(f"➡️  [{conn_id}] → {address}:{port}")
 
-        reader, writer = await asyncio.wait_for(
-            asyncio.open_connection(address, port),
-            timeout=10.0
+        # ── انتخاب Outbound ─────────────────────────────
+        outbound_id = link.get("outbound_id", "direct") if link else "direct"
+        ob = get_outbound(outbound_id)
+        logger.info(f"🔀 [{conn_id}] outbound={ob.get('name', outbound_id)} ({ob.get('type')})")
+
+        reader, writer = await open_via_outbound(
+            outbound_id,
+            address,
+            port,
+            timeout=10.0,
         )
         sock = writer.transport.get_extra_info('socket')
         if sock:
