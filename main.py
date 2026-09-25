@@ -526,12 +526,11 @@ except Exception as e:
     raise
 
 try:
-    from telegram_bot import (
-        start_bot as _tg_start_bot,
-        stop_bot as _tg_stop_bot,
-        configure_bot as _tg_configure_bot,
-        get_bot_status as _tg_get_bot_status,
-    )
+# Telegram bot disabled (circular import fix)
+async def _tg_start_bot(): pass
+async def _tg_stop_bot(): pass
+async def _tg_configure_bot(token, admin_ids): pass
+def _tg_get_bot_status(): return {"running": False, "configured": False, "admins_count": 0}
 except Exception as e:
     logger.error(f"❌ Failed to import telegram_bot: {type(e).__name__}: {e}")
     raise
