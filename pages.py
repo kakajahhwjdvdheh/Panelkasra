@@ -926,24 +926,7 @@ input:focus,select:focus,textarea:focus{border-color:var(--accent)!important;box
           <option value="vless">VLESS (زنجیره به سرور دیگه)</option>
         </select>
       </div>
-      <div class="modal-bg" id="modal-create-external">
-  <div class="modal-v2">
-    <div class="modal-v2-head">
-      <button class="modal-v2-close" onclick="closeModal('modal-create-external')"><i class="ti ti-x"></i></button>
-      <div class="modal-v2-icon" style="background:linear-gradient(135deg,#22c55e,#15803d)"><i class="ti ti-world-upload"></i></div>
-      <div class="modal-v2-title">سرور خارجی جدید</div>
-      <div class="modal-v2-sub">یه کانفیگ از پنل دیگه رو اضافه کن</div>
-    </div>
-    <div class="modal-v2-body">
-      <div class="modal-v2-field"><label><i class="ti ti-tag"></i> نام نمایشی</label><input class="modal-v2-input" id="ne-name" placeholder="مثلاً: سرور آلمان"></div>
-      <div class="modal-v2-field" style="margin-bottom:0"><label><i class="ti ti-link"></i> لینک کانفیگ</label><input class="modal-v2-input" id="ne-url" placeholder="vless://..." style="padding-right:13px"></div>
-      <div class="modal-v2-footer">
-        <button class="btn btn-o" onclick="closeModal('modal-create-external')" style="flex:.6">انصراف</button>
-        <button class="btn btn-p" onclick="createExternalConfig()" style="background:linear-gradient(135deg,#22c55e,#15803d)"><i class="ti ti-check"></i> افزودن</button>
-      </div>
-    </div>
-  </div>
-</div>
+
       <div id="no-fields-socks5">
         <div class="modal-v2-field">
           <label><i class="ti ti-world"></i> آدرس</label>
@@ -975,6 +958,24 @@ input:focus,select:focus,textarea:focus{border-color:var(--accent)!important;box
       <div class="modal-v2-footer">
         <button class="btn btn-o" onclick="closeModal('modal-create-outbound')" style="flex:.6">انصراف</button>
         <button class="btn btn-p" onclick="createOutbound()"><i class="ti ti-check"></i> ساخت</button>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="modal-bg" id="modal-create-external">
+  <div class="modal-v2">
+    <div class="modal-v2-head">
+      <button class="modal-v2-close" onclick="closeModal('modal-create-external')"><i class="ti ti-x"></i></button>
+      <div class="modal-v2-icon" style="background:linear-gradient(135deg,#22c55e,#15803d)"><i class="ti ti-world-upload"></i></div>
+      <div class="modal-v2-title">سرور خارجی جدید</div>
+      <div class="modal-v2-sub">یه کانفیگ از پنل دیگه رو اضافه کن</div>
+    </div>
+    <div class="modal-v2-body">
+      <div class="modal-v2-field"><label><i class="ti ti-tag"></i> نام نمایشی</label><input class="modal-v2-input" id="ne-name" placeholder="مثلاً: سرور آلمان"></div>
+      <div class="modal-v2-field" style="margin-bottom:0"><label><i class="ti ti-link"></i> لینک کانفیگ</label><input class="modal-v2-input" id="ne-url" placeholder="vless://..." style="padding-right:13px"></div>
+      <div class="modal-v2-footer">
+        <button class="btn btn-o" onclick="closeModal('modal-create-external')" style="flex:.6">انصراف</button>
+        <button class="btn btn-p" onclick="createExternalConfig()" style="background:linear-gradient(135deg,#22c55e,#15803d)"><i class="ti ti-check"></i> افزودن</button>
       </div>
     </div>
   </div>
@@ -1366,21 +1367,7 @@ input:focus,select:focus,textarea:focus{border-color:var(--accent)!important;box
     <div class="conn-empty-v2-sub">به محض اتصال کلاینت‌ها، اینجا نمایش داده می‌شوند</div>
   </div>
 </section>
-<section class="pg" id="pg-externals">
-  <div class="topbar">
-    <div><div class="tb-title"><i class="ti ti-world-upload"></i> سرورهای خارجی</div><div class="tb-sub">کانفیگ‌های خارجی که توی ساب‌لینک کاربرا نمایش داده می‌شن</div></div>
-    <div class="tb-right">
-      <span class="badge bg-green" id="externals-pg-cnt">۰ سرور</span>
-      <button class="btn btn-p" onclick="openModal('modal-create-external')" style="background:linear-gradient(135deg,#22c55e,#15803d)"><i class="ti ti-plus"></i> سرور جدید</button>
-    </div>
-  </div>
-  <div class="cl" style="margin-bottom:16px;background:rgba(34,197,94,.08);border-color:rgba(34,197,94,.2);color:#86efac">
-    <i class="ti ti-info-circle" style="color:#22c55e"></i>
-    <span>این کانفیگ‌ها <b>مستقیم</b> در ساب‌لینک کاربرا قرار می‌گیرن (کنار کانفیگ‌های پنل).</span>
-  </div>
-  <div class="cfg-grid" id="externals-grid"></div>
-  <div class="empty" id="externals-empty" style="display:none"><i class="ti ti-world-off"></i><p>هنوز سرور خارجی‌ای اضافه نشده</p></div>
-</section>
+
 <section class="pg" id="pg-externals">
   <div class="topbar">
     <div><div class="tb-title"><i class="ti ti-world-upload"></i> سرورهای خارجی</div><div class="tb-sub">کانفیگ‌های خارجی که توی ساب‌لینک کاربرا نمایش داده می‌شن</div></div>
