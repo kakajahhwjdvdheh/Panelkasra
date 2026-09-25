@@ -2368,6 +2368,13 @@ async function deleteExternalConfig(id){
   if(!confirm('حذف بشه؟'))return;
   try{const r=await authF('/api/external-configs/'+id,{method:'DELETE'});if(!r.ok)throw new Error();toast('حذف شد','ok');loadExternals();}catch(e){toast('خطا','err')}
 }
+async function toggleExternal(id,newState){
+  try{const r=await authF('/api/external-configs/'+id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({active:newState})});if(!r.ok)throw new Error();toast(newState?'فعال شد':'غیرفعال شد','ok');loadExternals();}catch(e){toast('خطا','err')}
+}
+async function deleteExternalConfig(id){
+  if(!confirm('حذف بشه؟'))return;
+  try{const r=await authF('/api/external-configs/'+id,{method:'DELETE'});if(!r.ok)throw new Error();toast('حذف شد','ok');loadExternals();}catch(e){toast('خطا','err')}
+}
 document.addEventListener('DOMContentLoaded',async()=>{
   await checkAuth();loadTelegramSettings();
   initCharts();
@@ -2382,6 +2389,7 @@ document.addEventListener('DOMContentLoaded',async()=>{
     if(document.getElementById('pg-connections').classList.contains('on'))loadConns();
     if(document.getElementById('pg-logs').classList.contains('on'))loadActivity();
     if(document.getElementById('pg-outbounds').classList.contains('on'))loadOutbounds();
+    if(document.getElementById('pg-externals').classList.contains('on'))loadExternals();
   },5000);
 });
 </script>
