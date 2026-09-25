@@ -2334,12 +2334,46 @@ function wsLog(c,m){const l=document.getElementById('ws-log'),p=document.createE
 function wsConn(){const u=document.getElementById('ws-uuid').value.trim();if(!u){toast('UUID را وارد کنید','err');return}const url=(location.protocol==='https:'?'wss':'ws')+'://'+location.host+'/ws/'+u;wsLog('info','اتصال: '+url);ws=new WebSocket(url);ws.onopen=()=>wsLog('ok','✓ متصل - UUID معتبر');ws.onerror=()=>wsLog('err','✗ خطا - UUID نامعتبر یا غیرفعال');ws.onmessage=m=>wsLog('info','دریافت '+(m.data.size||m.data.length)+' byte');ws.onclose=e=>wsLog('err','قطع ('+e.code+')'+(e.code===1008?' - دسترسی رد شد':''))}
 function wsSend(){const m=document.getElementById('ws-msg').value;if(!m||!ws||ws.readyState!==1)return;ws.send(m);wsLog('sent','ارسال: '+m);document.getElementById('ws-msg').value=''}
 function wsDisc(){if(ws)ws.close()}
+// ══════ External Configs ══════
+let allExternals=[];
+async function loadExternals(){
+  try{
+    const r=await authF('/api/external-configs'),d=await r.json();
+    allExternals=d.configs||[];
+    document.getElementById('externals-nb').textContent=allExternals.length;
+    document.getElementById('externals-pg-cnt').textContent=toFa(allExternals.length)+' سرور';
+    const grid=document.getElementById('externals-grid'),empty=document.getElementById('externals-empty');
+    if(!allExternals.length){grid.innerHTML='';empty.style.display='block';return}
+    empty.style.display='none';
+    grid.innerHTML=allExternals.map(c=>`<div class="cfg-card"><div class="cfg-row"><span class="cfg-status-dot" style="background:${c.active?'var(--green)':'var(--red)'}"></span><div class="cfg-identity"><div class="cfg-label">${esc(c.name)}</div></div><div class="cfg-divider-v"></div><div class="cfg-usage-col"><div style="font-size:10.5px;color:var(--t2);word-break:break-all">${esc((c.url||'').slice(0,70))}</div></div><div class="cfg-divider-v"></div><div class="cfg-actions"><button class="tog${c.active?' on':''}" onclick="toggleExternal('${c.id}',${!c.active})"></button><button class="btn btn-sm btn-d btn-icon" onclick="deleteExternalConfig('${c.id}')"><i class="ti ti-trash"></i></button></div></div></div>`).join('');
+  }catch(e){console.error(e)}
+}
+async function createExternalConfig(){
+  const name=document.getElementById('ne-name').value.trim()||'سرور خارجی';
+  const url=document.getElementById('ne-url').value.trim();
+  if(!url){toast('لینک الزامی است','err');return}
+  try{
+    const r=await authF('/api/external-configs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,url})});
+    if(!r.ok){const d=await r.json().catch(()=>({}));throw new Error(d.detail||'خطا')}
+    ['ne-name','ne-url'].forEach(id=>document.getElementById(id).value='');
+    closeModal('modal-create-external');
+    toast('سرور خارجی اضافه شد ✓','ok');
+    loadExternals();
+  }catch(e){toast('✗ '+e.message,'err')}
+}
+async function toggleExternal(id,newState){
+  try{const r=await authF('/api/external-configs/'+id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({active:newState})});if(!r.ok)throw new Error();toast(newState?'فعال شد':'غیرفعال شد','ok');loadExternals();}catch(e){toast('خطا','err')}
+}
+async function deleteExternalConfig(id){
+  if(!confirm('حذف بشه؟'))return;
+  try{const r=await authF('/api/external-configs/'+id,{method:'DELETE'});if(!r.ok)throw new Error();toast('حذف شد','ok');loadExternals();}catch(e){toast('خطا','err')}
+}
 document.addEventListener('DOMContentLoaded',async()=>{
   await checkAuth();loadTelegramSettings();
   initCharts();
   document.getElementById('set-host').textContent=location.host;
   document.getElementById('sub-all-url')&&(document.getElementById('sub-all-url').textContent=location.protocol+'//'+location.host+'/sub-all');
-  fetchStats();fetchDefaultVless();loadLinks();loadSubs();loadOutbounds();
+  fetchStats();fetchDefaultVless();loadLinks();loadSubs();loadOutbounds();loadExternals();
   setInterval(fetchStats,4000);
   setInterval(()=>{
     if(document.getElementById('pg-links').classList.contains('on'))loadLinks();
